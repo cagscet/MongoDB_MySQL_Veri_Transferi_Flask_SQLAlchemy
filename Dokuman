@@ -1,0 +1,142 @@
+MongoDB ➜ MySQL Veri Transferi (Flask + SQLAlchemy)Bu dokümantasyon, Flask tabanlı Python uygulamasının
+MongoDB’den verileri çekip SQLAlchemy ORM ile MySQL veritabanına aktarma sürecini ve sunulan API uçlarını açıklar.
+Proje dosyaları:
+app.py: Flask uygulaması, yapılandırma, transfer süreci ve API uçları
+models.py: SQLAlchemy ORM tablo modelleri
+extensions.py: SQLAlchemy ve PyMongo uzantıları
+database_manager.py: MongoDB ➜ MySQL veri transfer fonksiyonları
+
+1) Amaç ve Genel MimariUygulama başlatıldığında, ayrı bir thread üzerinde MongoDB’den veriler okunur ve uygun tablolara
+ORM üzerinden yazılır. Transfer tamamlanana kadar API uçlarına erişim 503 (Service Unavailable) ile kısıtlanır.
+Transfer bittiğinde API aktif hale gelir ve hem tüm verileri hem de imei bazlı filtrelenmiş verileri JSON olarak sunar.
+Akış:
+Flask uygulaması başlar
+run_transfer() ayrı thread’de database_manager.transfer_data() fonksiyonunu çağırır
+Transfer tamamlanır → transfer_done = True
+API istekleri /data ve /get_by_imei uçlarından sorgulanabilir
+
+2) Kullanılan Teknolojiler ve BağımlılıklarPython 3.9+
+Flask (web framework)
+Flask-SQLAlchemy (ORM)
+mysql-connector-python (MySQL sürücüsü)
+Flask-PyMongo (MongoDB bağlantısı)
+python-dotenv (ortam değişkenleri)
+PyMongo (Flask-PyMongo ile birlikte)
+Önerilen requirements.txt
+Flask
+Flask-SQLAlchemy
+mysql-connector-python
+Flask-PyMongo
+python-dotenv
+pymongo
+
+3) Ortam Değişkenleri (.env)Aşağıdaki değişkenler .env dosyasında tanımlanmalıdır:
+# MySQL
+MYSQL_USER=your_user
+MYSQL_PASSWORD=your_password
+MYSQL_HOST=localhost
+MYSQL_DATABASE=your_database
+
+# MongoDB
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=your_mongo_db
+MONGO_COLLECTION=your_collectionNot: app.py içinde SQLAlchemy bağlantı URI’si mysql+mysqlconnector:// şemasını kullanır.
+
+4) Kurulum ve ÇalıştırmaDepoyu klonlayın / kodları indirin
+Sanal ortam oluşturun ve etkinleştirin
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activateBağımlılıkları yükleyin
+pip install -r requirements.txt.env dosyasını oluşturup değerleri girin
+İlk tablo oluşturma (opsiyonel) – Eğer tablolar henüz yoksa aşağıdaki komutlarla oluşturabilirsiniz:
+# interactive shell
+>>> from app import app, db
+>>> with app.app_context():
+...     db.create_all()Uygulamayı başlatın
+python app.pyKonsolda “Veri transferi devam ediyor…” mesajını görebilirsiniz. Transfer sonrası “Veri transferi tamamlandı!” döner.
+Üretim (Production) Notu: Transfer işlemi uygulama başında, ayrı bir thread’de tetiklenir. Çoklu worker (gunicorn, uwsgi)
+veya yeniden başlatma senaryolarında aynı transferin birden fazla kez tetiklenmemesi için ek önlemler (kilit mekanizmaları,
+durum kaydı vb.) önerilir.
+
+5) Proje Yapısı ve Dosyalarproject/
+├─ app.py                 # Flask uygulaması, config, thread, API
+├─ models.py              # SQLAlchemy ORM tabloları
+├─ extensions.py          # db (SQLAlchemy), mongo_db (PyMongo)
+└─ database_manager.py    # Transfer fonksiyonları ve alan eşlemeleri5.1 app.py (Özet).env yüklenir, Flask app oluşturulur
+MySQL: SQLALCHEMY_DATABASE_URI = mysql+mysqlconnector://...
+MongoDB: MONGO_URI ile Flask-PyMongo yapılandırması
+db.init_app(app) ve mongo_db.init_app(app)
+Uygulama başında run_transfer() bir thread ile çalışır
+@app.before_request → transfer_done == False ise 503 döner
+Uçlar:
+/ → Durum mesajı (transfer sürüyor / tamamlandı)
+/data → Tüm tabloları dinamik gezerek JSON döner
+/get_by_imei?imei=... → imei filtresi ile tabloları JSON döner
+Serileştirme: datetime/date/time alanları ISO 8601 formatına çevrilir.
+5.2 models.py (Tablolar)Information
+Relays
+RebootInfo
+AcFailInfo
+GSMConnectionInfo (MySQL TINYINT(1) yerine ORM Boolean)
+ServerConnectionInfo
+Monitor
+Meters
+MeterData
+MeterDataDetails
+Kimlikler (id): Information.id Mongo _id (string) olarak set edilir; diğer tablolarda uuid4() ile üretilir. imei alanı
+BigInteger olarak yer alır.
+5.3 extensions.pyBasit uzantı tanımları:
+from flask_sqlalchemy import SQLAlchemy
+from flask_pymongo import PyMongo
+
+db = SQLAlchemy()
+mongo_db = PyMongo()5.4 database_manager.py (Eşleme Mantığı)Genel:
+Mongo: mongo_db.cx[MONGO_DB][MONGO_COLLECTION]
+Koleksiyondaki her belge için ilgili transfer fonksiyonları çağrılır
+db.session.merge(...) ile upsert benzeri davranış
+İşlem sonunda tek bir commit() (başarısızlıkta rollback())
+Alan Dönüşümleri ve Formatlar:
+Tarih/Saat formatları:
+Olaylar: '%Y-%m-%d %H:%M:%S'
+GSM Connection: '%Y-%m-%d,%H:%M:%S' (tarih ve saat arasında virgül)
+Yüzdelikler: '85%' gibi değerler temizlenip int’e çevrilir
+Sayısal güvenli dönüşüm için safe_int
+Fonksiyonlar:
+transfer_information(doc): INFORMATION ve altındaki COMM alanlarını Information tablosuna işler.
+transfer_relays(doc): EVENT içinde RELAY1/2/3 listelerini Relays tablosuna taşır. Tarihi parçalayıp date ve time alanlarına yazar.
+transfer_reboot_info(doc): EVENT.Reboot → RebootInfo
+transfer_ac_fail_info(doc): EVENT.AC → AcFailInfo
+transfer_gsm_connection_info(doc): GSMCONNECTIONINFO.LogOfConnection → GSMConnectionInfo (IP, Sinyal, MNC/MCC/LAC/CID vs.)
+transfer_server_connection_info(doc): (şu anda boş) — örnek JSON’da detay olmadığı için uygulanmadı.
+transfer_monitor(doc): MONITOR altındaki listelerin ilk elemanlarını alıp Monitor tablosuna tek satır yazar.
+transfer_meters(doc): (boş) — uygun alan görülmedi.
+transfer_meter_data(doc): PERFORMANCE.DefaultInst | DefaultINST | DefaultINSTPROG altından sayaç bazlı değerleri MeterData
+tablosuna yazar. RATE yüzde temizlenerek sayıya çevrilir.
+transfer_meter_data_details(doc): (boş) — veri yok.
+Önemli: transfer_data() fonksiyonu dosyada iki kez tanımlıydı; son bölümdeki çok-tablu versiyon kullanılmaktadır.
+
+6) API Uç Noktaları6.1 GET /Açıklama: Uygulama durumunu döner
+Dönüş:
+"Veri transferi devam ediyor..." (transfer bitmediyse)
+"Veri transferi tamamlandı!" (transfer bittiyse)
+6.2 GET /dataAçıklama: Tüm tabloların tamamını dinamik keşifle JSON döner
+Dönüş Örneği (kırpılmış):
+{
+  "information": [ {"id": "...", "imei": 123456789012345, "version": "..."} ],
+  "relays": [ {"id": "...", "imei": 123..., "date": "2024-09-01", "ChangeDate": "12:34:56", "State": 1} ],
+  "MeterData": [ {"id": "...", "meter_serial": 1001, "Rate": 85} ]
+}6.3 GET /get_by_imei?imei=<IMEI>Parametre: imei (zorunlu)
+Açıklama: Tablolarda imei sütunu olanların, verilen değere eşit kayıtlarını döner
+Hata Durumu: imei yoksa 400 {"error": "imei parametresi eksik"}
+Not: Bu uç nokta sadece imei sütunu bulunan tabloları filtreler. Diğer tablolar (ör. MeterDataDetails) döndürülmez.
+
+7) Örnek İstekler (cURL)Tüm veriler:
+http://127.0.0.1:5000 ile veri transferinin durumunu gösterir
+
+http://127.0.0.1:5000/data ile tüm verileri görüntüler
+
+http://127.0.0.1:5000/get_by_imei?imei=864011066782501 ile sadece girilen imei'nin verilerini gösterir
+
+9) Güvenlik ve Yapılandırma NotlarıKimlik bilgilerini .env dışında paylaşmayın; depo dışı gizli tutun
+Üretimde DEBUG kapalı olmalı (app.run(debug=False))
+Çoklu worker ortamlarında transferin tekil çalışması için kilit (mutex), “transfer tamamlandı” durumunun
+DB’de tutulması veya görev kuyruğu (RQ/Celery) tercih edilebilir
